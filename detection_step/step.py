@@ -5,6 +5,11 @@ from .utils.prv_candidates.strategies import (
     ATLASPrvCandidatesStrategy,
     ZTFPrvCandidatesStrategy,
 )
+from .utils.correction.corrector import Corrector
+from .utils.correction.strategies import (
+    ATLASCorrectionStrategy,
+    ZTFCorrectionStrategy,
+)
 
 from typing import Tuple
 
@@ -36,6 +41,9 @@ class DetectionStep(GenericStep):
         self.version = config["STEP_METADATA"]["STEP_VERSION"]
         self.prv_candidates_processor = Processor(
             ZTFPrvCandidatesStrategy()
+        )  # initial strategy (can change)
+        self.detections_corrector = Corrector(
+            ZTFCorrectionStrategy()
         )  # initial strategy (can change)
 
     def process_prv_candidates(
@@ -79,6 +87,30 @@ class DetectionStep(GenericStep):
         non_detections = pd.concat(non_detections, ignore_index=True)
         return detections, non_detections
 
+    def correct(self, detections: pd.DataFrame) -> pd.DataFrame:
+        """Correct Detections.
+
+        Parameters
+        ----------
+        detections
+
+        Returns
+        -------
+
+        """
+        response = []
+        for idx, gdf in detections.groupby("tid"):
+            if "ZTF" == idx:
+                self.detections_corrector.strategy = ZTFCorrectionStrategy()
+            elif "ATLAS" in idx:
+                self.detections_corrector.strategy = ATLASCorrectionStrategy()
+            else:
+                raise ValueError(f"Unknown Survey {idx}")
+            corrected = self.detections_corrector.compute(gdf)
+            response.append(corrected)
+        response = pd.concat(response, ignore_index=True)
+        return response
+
     def execute(self, messages):
         self.logger.info(f"Processing {len(messages)} alerts")
         alerts = pd.DataFrame(messages)
@@ -106,3 +138,5 @@ class DetectionStep(GenericStep):
         detections.drop_duplicates(
             "candid", inplace=True, keep="first", ignore_index=True
         )
+        # Do correction to detections from stream
+        detections = self.correct(detections)
