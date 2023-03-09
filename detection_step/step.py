@@ -1,21 +1,15 @@
-from apf.core.step import GenericStep
-
-from .utils.prv_candidates.processor import Processor
-from .utils.prv_candidates.strategies import (
-    ATLASPrvCandidatesStrategy,
-    ZTFPrvCandidatesStrategy,
-)
-from .utils.correction.corrector import Corrector
-from .utils.correction.strategies import (
-    ATLASCorrectionStrategy,
-    ZTFCorrectionStrategy,
-)
-
-from typing import Tuple
+from typing import List, Tuple
 
 import numpy as np
+from apf.core.step import GenericStep
+from apf.producers import KafkaProducer
+from detection_step.core.correction.corrector import Corrector
+from detection_step.core.strategies import ZTFCorrectionStrategy, ATLASCorrectionStrategy
+
 import pandas as pd
 import logging
+import json
+from apf.core import get_class
 
 class DetectionStep(GenericStep):
     """DetectionStep Description
@@ -30,113 +24,78 @@ class DetectionStep(GenericStep):
     """
 
     def __init__(
-            self,
-            consumer=None,
-            config=None,
-            level=logging.INFO,
-            producer=None,
-            **step_args,
+        self,
+        config,
+        level=logging.INFO,
+        **step_args,
     ):
-        super().__init__(consumer, config=config, level=level)
-        self.version = config["STEP_METADATA"]["STEP_VERSION"]
-        self.prv_candidates_processor = Processor(
-            ZTFPrvCandidatesStrategy()
-        )  # initial strategy (can change)
+        super().__init__(config=config, level=level, **step_args)
         self.detections_corrector = Corrector(
             ZTFCorrectionStrategy()
         )  # initial strategy (can change)
+        producer_class = get_class(self.config["SCRIBE_PRODUCER_CONFIG"]["CLASS"])
+        self.scribe_producer = producer_class(self.config["SCRIBE_PRODUCER_CONFIG"])
 
-    def process_prv_candidates(
-        self, alerts: pd.DataFrame
-    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-        """Separate previous candidates from alerts.
+    def pre_produce(self, result: Tuple):
+        self.set_producer_key_field("aid")
+        output = []
+        for index, alert in enumerate(result[0]):
+            output.append(
+                {
+                    "aid": alert["aid"],
+                    "detections": result[1][index],
+                    "non_detections": alert["non_detections"],
+                }
+            )
+        return output
 
-        The input must be a DataFrame created from a list of GenericAlert.
-
-        Parameters
-        ----------
-        alerts: A pandas DataFrame created from a list of GenericAlerts.
-
-        Returns A Tuple with detections a non_detections from previous candidates
-        -------
-
-        """
-        # dicto = {
-        #     "ZTF": ZTFPrvCandidatesStrategy()
-        # }
-        data = alerts[
-            ["aid", "oid", "tid", "candid", "ra", "dec", "pid", "extra_fields"]
-        ]
-        detections = []
-        non_detections = []
-        for tid, subset_data in data.groupby("tid"):
-            if tid == "ZTF":
-                self.prv_candidates_processor.strategy = (
-                    ZTFPrvCandidatesStrategy()
-                )
-            elif "ATLAS" in tid:
-                self.prv_candidates_processor.strategy = (
-                    ATLASPrvCandidatesStrategy()
-                )
-            else:
-                raise ValueError(f"Unknown Survey {tid}")
-            det, non_det = self.prv_candidates_processor.compute(subset_data)
-            detections.append(det)
-            non_detections.append(non_det)
-        detections = pd.concat(detections, ignore_index=True)
-        non_detections = pd.concat(non_detections, ignore_index=True)
-        return detections, non_detections
-
-    def correct(self, detections: pd.DataFrame) -> pd.DataFrame:
+    def correct(self, messages: List[dict]) -> List[List[dict]]:
         """Correct Detections.
 
         Parameters
         ----------
-        detections
+        messages
 
         Returns
         -------
 
         """
-        response = []
-        for idx, gdf in detections.groupby("tid"):
-            if "ZTF" == idx:
+        corrections = []
+        for message in messages:
+            del message['new_alert']['extra_fields']['prv_candidates']
+            detections = message['prv_detections'] + [message['new_alert']]
+            if "ZTF" == message['new_alert']['tid']:
                 self.detections_corrector.strategy = ZTFCorrectionStrategy()
-            elif "ATLAS" in idx:
+            elif "ATLAS" == message['new_alert']['tid']:
                 self.detections_corrector.strategy = ATLASCorrectionStrategy()
-            else:
-                raise ValueError(f"Unknown Survey {idx}")
-            corrected = self.detections_corrector.compute(gdf)
-            response.append(corrected)
-        response = pd.concat(response, ignore_index=True)
-        return response
+            df = pd.DataFrame(detections).replace({np.nan:None})
+            df['rfid'] = df['rfid'].astype('Int64')
+            correction_df = self.detections_corrector.compute(df)
+            alert_corrections = correction_df.to_dict('records')
+            corrections.append(alert_corrections)
+        return corrections
 
     def execute(self, messages):
-        self.logger.info(f"Processing {len(messages)} alerts")
-        alerts = pd.DataFrame(messages)
+        self.logger.info("Processing %s alerts", str(len(messages)))
         # If is an empiric alert must has stamp
-        alerts["has_stamp"] = True
-        # Process previous candidates of each alert
-        (
-            dets_from_prv_candidates,
-            non_dets_from_prv_candidates,
-        ) = self.process_prv_candidates(alerts)
-        # If is an alert from previous candidate hasn't stamps
-        # Concat detections from alerts and detections from previous candidates
-        if dets_from_prv_candidates.empty:
-            detections = alerts.copy()
-            detections["parent_candid"] = np.nan
-        else:
-            dets_from_prv_candidates["has_stamp"] = False
-            detections = pd.concat(
-                [alerts, dets_from_prv_candidates], ignore_index=True
-            )
-        # Remove alerts with the same candid duplicated.
-        # It may be the case that some candids are repeated or some
-        # detections from prv_candidates share the candid.
-        # We use keep='first' for maintain the candid of empiric detections.
-        detections.drop_duplicates(
-            "candid", inplace=True, keep="first", ignore_index=True
-        )
         # Do correction to detections from stream
-        detections = self.correct(detections)
+        detections = self.correct(messages)
+        return messages, detections
+
+    def post_execute(self, result: Tuple):
+        for detections in result[1]:
+            self.produce_scribe(detections)
+        return result
+
+    def produce_scribe(self, detections: List[dict]):
+        for detection in detections:
+            #candid = detection.pop('candid')
+            scribe_data = {
+                "collection": "detection",
+                "type": "update",
+                "criteria": {"_id": detection["candid"]},
+                "data": detection,
+                "options": {"upsert": True}
+            }
+            scribe_payload = {"payload": json.dumps(scribe_data)}
+            self.scribe_producer.produce(scribe_payload)

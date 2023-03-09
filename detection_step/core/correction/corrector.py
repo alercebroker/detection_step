@@ -1,5 +1,5 @@
 from __future__ import annotations
-from .strategies.base_correction_strategy import BaseCorrectionStrategy
+from detection_step.core.strategies.base_correction_strategy import BaseCorrectionStrategy
 import pandas as pd
 
 
