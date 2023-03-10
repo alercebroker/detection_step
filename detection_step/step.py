@@ -4,12 +4,16 @@ import numpy as np
 from apf.core.step import GenericStep
 from apf.producers import KafkaProducer
 from detection_step.core.correction.corrector import Corrector
-from detection_step.core.strategies import ZTFCorrectionStrategy, ATLASCorrectionStrategy
+from detection_step.core.strategies import (
+    ZTFCorrectionStrategy,
+    ATLASCorrectionStrategy,
+)
 
 import pandas as pd
 import logging
 import json
 from apf.core import get_class
+
 
 class DetectionStep(GenericStep):
     """DetectionStep Description
@@ -62,16 +66,15 @@ class DetectionStep(GenericStep):
         """
         corrections = []
         for message in messages:
-            del message['new_alert']['extra_fields']['prv_candidates']
-            detections = message['prv_detections'] + [message['new_alert']]
-            if "ZTF" == message['new_alert']['tid']:
+            detections = message["prv_detections"] + [message["new_alert"]]
+            if "ZTF" == message["new_alert"]["tid"]:
                 self.detections_corrector.strategy = ZTFCorrectionStrategy()
-            elif "ATLAS" == message['new_alert']['tid']:
+            elif "ATLAS" == message["new_alert"]["tid"]:
                 self.detections_corrector.strategy = ATLASCorrectionStrategy()
-            df = pd.DataFrame(detections).replace({np.nan:None})
-            df['rfid'] = df['rfid'].astype('Int64')
+            df = pd.DataFrame(detections).replace({np.nan: None})
+            df["rfid"] = df["rfid"].astype("Int64")
             correction_df = self.detections_corrector.compute(df)
-            alert_corrections = correction_df.to_dict('records')
+            alert_corrections = correction_df.to_dict("records")
             corrections.append(alert_corrections)
         return corrections
 
@@ -89,13 +92,13 @@ class DetectionStep(GenericStep):
 
     def produce_scribe(self, detections: List[dict]):
         for detection in detections:
-            #candid = detection.pop('candid')
+            # candid = detection.pop('candid')
             scribe_data = {
                 "collection": "detection",
                 "type": "update",
                 "criteria": {"_id": detection["candid"]},
                 "data": detection,
-                "options": {"upsert": True}
+                "options": {"upsert": True},
             }
             scribe_payload = {"payload": json.dumps(scribe_data)}
             self.scribe_producer.produce(scribe_payload)
