@@ -1,4 +1,4 @@
-FROM python:3.6
+FROM python:3.10
 
 COPY requirements.txt /app/requirements.txt
 RUN pip install -r /app/requirements.txt
@@ -6,6 +6,4 @@ RUN pip install -r /app/requirements.txt
 WORKDIR /app
 COPY . /app
 
-WORKDIR /app/scripts
-
-CMD ["python", "run_step.py"]
+CMD ["python", "scripts/run_step.py"]
